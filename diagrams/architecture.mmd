@@ -1,0 +1,73 @@
+flowchart TD
+    subgraph Inputs["Inputs"]
+        A1["data/songs.csv"]
+        A2["data/song_notes.md"]
+        A3["User Profile (from PROFILES dict)"]
+    end
+
+    subgraph Recommender["src/recommender.py"]
+        B1["load_songs()"]
+        B2["score_song() / recommend_songs()<br/>scores &amp; ranks all songs"]
+    end
+
+    A1 --> B1
+    B1 --> B2
+    A3 --> B2
+
+    subgraph RAG["src/rag.py"]
+        C1["SongNoteStore<br/>(TF-IDF index over notes)"]
+        C2["retrieve_context()<br/>for each top-ranked song"]
+    end
+
+    A2 --> C1
+    B2 -->|"top-k ranked songs"| C2
+    C1 --> C2
+
+    subgraph LLMAgent["src/llm_agent.py"]
+        D1{"ANTHROPIC_API_KEY set?"}
+        D2["generate_explanation()<br/>calls Claude API<br/>(claude-sonnet-4-5)"]
+        D3["Offline stand-in<br/>(deterministic, from context)"]
+    end
+
+    C2 -->|"grounding context"| D1
+    D1 -->|"yes"| D2
+    D1 -->|"no, or API call fails"| D3
+
+    subgraph Guardrails["src/guardrails.py"]
+        E1["validate_explanation()"]
+        E2{"existence check<br/>(mentions title/artist?)"}
+        E3{"energy consistency check<br/>(descriptor word matches energy?)"}
+        E4{"sanity check<br/>(non-empty, under 60 words?)"}
+        E5["final_text = LLM text<br/>source = llm"]
+        E6["final_text = deterministic sentence<br/>built from score_song() reasons<br/>source = fallback"]
+    end
+
+    D2 --> E1
+    D3 --> E1
+    E1 --> E2
+    E2 -->|"pass"| E3
+    E3 -->|"pass"| E4
+    E4 -->|"pass"| E5
+    E2 -->|"fail"| E6
+    E3 -->|"fail"| E6
+    E4 -->|"fail"| E6
+    B2 -.->|"reasons list"| E6
+
+    subgraph Output["Output"]
+        F1["Final ranked recommendations<br/>with validated explanations"]
+    end
+
+    E5 --> F1
+    E6 --> F1
+
+    subgraph Testing["Testing"]
+        G1["evaluate.py<br/>(normal / edge / failure cases)"]
+        G2["tests/test_ai_pipeline.py<br/>(pytest unit tests)"]
+    end
+
+    G1 -.tests.-> C2
+    G1 -.tests.-> E1
+    G2 -.tests.-> C1
+    G2 -.tests.-> C2
+    G2 -.tests.-> E1
+    G2 -.tests.-> D2
