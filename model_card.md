@@ -184,3 +184,125 @@ If I extended this project, I'd want to try adding valence scoring next,
 since I noticed two songs can share the same mood label (like "intense")
 but feel completely different emotionally — one dark and aggressive, one
 bright and energetic — and my current system treats them identically.
+
+---
+
+## 10. Project 4 Extension: RAG-Grounded LLM Explanations
+
+### 10.1 Dataset
+
+Project 4 uses the same 18-song catalog as VibeFinder 1.0, with each song
+carrying seven attributes: genre, mood, energy, tempo_bpm, valence,
+danceability, and acousticness. Alongside the CSV, each song also has a
+short hand-written note (`data/song_notes.md`) describing its feel in
+plain language, grounded in those same attribute values. The intended
+purpose of this dataset in Project 4 is **not** production music
+recommendation — it's small and hand-written specifically to demonstrate,
+in a controllable and checkable way, how grounded LLM explanation
+generation works: can an LLM write an accurate-sounding sentence about a
+song using only retrieved facts, and can a guardrail actually catch it
+when it doesn't?
+
+### 10.2 The Approach, in Plain Language
+
+1. The deterministic scorer (unchanged from VibeFinder 1.0) picks the
+   candidate songs — same genre/mood/energy point system as before.
+2. For each candidate, a retrieval step (RAG) pulls that song's own
+   background note plus its most similar notes, so there's real,
+   fact-checkable material to write from.
+3. An LLM is asked to write one short sentence explaining why the song
+   suits the user — but only using facts from those retrieved notes and
+   the song's own attributes, not from general knowledge or guesswork.
+4. Before that sentence is shown to anyone, a guardrail step checks it: does
+   it actually mention the song (not a different one), does any
+   energy-related word it uses match the song's real energy value, and is
+   it a reasonably-sized, non-empty sentence? If it fails any of these, the
+   system doesn't show the LLM's sentence at all — it falls back to a
+   plain, deterministic explanation built from the same point-system
+   reasons VibeFinder 1.0 already produces.
+
+The guardrail step is the important addition here: it means the system
+never blindly trusts what the LLM wrote — it only shows it after
+double-checking it against facts that were already known to be true.
+
+### 10.3 Limitations and Biases (Project 4)
+
+- The dataset is still the same small, hand-written 18-song catalog from
+  VibeFinder 1.0 — it isn't representative of the diversity of real music,
+  so conclusions about how well the LLM explanations work don't
+  necessarily generalize beyond this toy catalog.
+- The guardrail's energy-consistency check relies on a hand-coded list of
+  descriptor words (like "energetic," "intense," "calm," "mellow"). This
+  list is incomplete by construction — an LLM could describe a song as
+  "explosive" or "sedate" (words not on the list) and the check would
+  simply pass trivially without ever actually verifying that claim,
+  because it only checks words it was told to look for.
+- The offline stand-in mode isn't a real LLM at all — it's a deterministic
+  string-manipulation fallback that always produces a similarly-structured
+  sentence ("[OFFLINE STAND-IN] {title} by {artist}: {first sentence of
+  the note}"). It's useful for reliable grading/demo purposes, but it
+  can't demonstrate genuine language generation or vary its phrasing the
+  way a real model call would.
+- The RAG retrieval step uses TF-IDF (keyword frequency) similarity, not
+  semantic embeddings. This means it matches songs based on shared words in
+  their notes, not on deeper conceptual similarity — two songs that "feel"
+  similar but are described with completely different vocabulary might not
+  be retrieved as similar to each other, even though a human (or an
+  embedding model) would group them together.
+
+### 10.4 Concrete Improvement Idea
+
+The most impactful next step would be to **replace the TF-IDF retrieval
+with embedding-based retrieval** (e.g. a sentence-embedding model instead
+of `TfidfVectorizer`). This would let the system find genuinely similar
+songs even when their notes use different words to describe similar
+qualities (e.g. a note that says "laid-back" and one that says "relaxed"
+would currently look less similar under TF-IDF than they should). A second
+worthwhile improvement, closer to the guardrail itself, would be
+**replacing the hardcoded energy-descriptor word list with a second,
+narrowly-scoped LLM check** ("does this specific sentence make any claim
+about energy level that contradicts the number 0.XX?") — that would catch
+mismatched claims using words never anticipated in the current fixed list,
+at the cost of an extra model call per explanation.
+
+### 10.5 AI Collaboration Reflection (Project 4 Build)
+
+**A helpful AI suggestion:** while writing `tests/test_ai_pipeline.py`
+test-first, one of the required tests asserted that
+`SongNoteStore.retrieve_context()` should contain a song's title. Writing
+that test surfaced a real bug: the actual implementation didn't satisfy
+it — note bodies never included the title at all, since the title only
+lived in the markdown header line, which the parser deliberately stripped
+out. That failing test caught a mismatch that would otherwise have gone
+unnoticed, and led directly to fixing `retrieve_context()` (not
+`get_note()` or `retrieve_similar()`, which stayed unchanged) so each
+retrieved block is prefixed with its song's title and artist.
+
+**A specific flawed AI output:** the first version of `_offline_stand_in()`
+in `src/llm_agent.py` took only the retrieved `context` string, stripped
+its markdown headers, and returned the first sentence — it never
+explicitly included the song's title or artist anywhere in the returned
+text. Because the title lived only in that stripped header, the guardrail's
+existence check failed on the offline fallback path even though the
+sentence's facts were accurate — a smoke test showed `source: fallback`
+with a failed `existence` check on what was supposed to be a normal,
+passing case. This was caught by running the guardrail smoke test and
+noticing the mismatch between the expected and actual `source`, and fixed
+by changing `_offline_stand_in`'s signature to `(song, context)` and
+explicitly prefixing the output with `"{song['title']} by {song['artist']}:
+"` before the retrieved sentence.
+
+### 10.6 System Limitations
+
+- **No persistence** — nothing about a recommendation, an explanation, or
+  a guardrail decision is saved anywhere; every run starts from a clean
+  slate reading the same CSV and markdown files.
+- **Small dataset** — as noted above, 18 songs is enough to demonstrate the
+  pipeline mechanics but far too small to say anything meaningful about
+  real-world explanation quality or retrieval accuracy at scale.
+- **Offline mode is an approximation, not a replacement** — the
+  deterministic offline stand-in exists so the system can run without an
+  API key, but it does not replicate the reasoning quality, phrasing
+  variety, or failure modes of an actual LLM call; guardrail behavior
+  verified only against the offline stand-in may not fully represent how
+  the guardrail performs against real, more varied Claude output.

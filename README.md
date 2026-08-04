@@ -1,4 +1,184 @@
-# 🎵 Music Recommender Simulation
+# 🎵 Music Recommender Simulation — Project 4: RAG-Grounded LLM Explanations with Guardrails
+
+## Base Project
+
+This project is an extension of the **Music Recommender Simulation (Module
+3)**. The original system's goal was to score songs against a user's stated
+preferences — favorite genre, favorite mood, and target energy — and return
+the highest-scoring songs as recommendations. It does this entirely through
+deterministic, rule-based scoring: no machine learning, no LLM calls, just a
+fixed point system (genre match, mood match, energy closeness) applied
+consistently across the song catalog. That original scoring and ranking
+logic (`src/recommender.py`) is unchanged and still powers every
+recommendation in this project.
+
+## Title and Summary
+
+**Project 4: RAG-Grounded LLM Explanations with Guardrails** takes the
+Module 3 recommender's deterministic rankings and adds a natural-language
+explanation layer on top of them — one that's *grounded* in real song data
+(via retrieval-augmented generation) and *checked* before it's ever shown to
+a user (via a guardrail layer), rather than trusting an LLM's output at face
+value. This matters because LLM-generated explanations are easy to get
+wrong in subtle, plausible-sounding ways — naming the wrong song, or
+describing a high-energy track as "calm" — and a recommender that explains
+its choices inaccurately is arguably worse than one that doesn't explain
+itself at all. The system still works fully offline (with a deterministic
+fallback) so it never depends on an API key or network access to run or be
+graded.
+
+## Architecture Overview
+
+The full pipeline is diagrammed in
+[`diagrams/architecture.mmd`](diagrams/architecture.mmd) (Mermaid source —
+render it with any Mermaid-compatible viewer, e.g. the Mermaid Live Editor
+or a Markdown preview extension that supports Mermaid). The flow:
+
+1. **Recommender** (`src/recommender.py`) scores every song in
+   `data/songs.csv` against a user profile and ranks them —
+   `recommend_songs()` returns the top-k songs with their scores.
+2. **RAG retrieval** (`src/rag.py`) — `SongNoteStore` builds a TF-IDF index
+   over `data/song_notes.md` and `retrieve_context()` pulls each
+   top-ranked song's own note plus its most similar notes, to ground the
+   next step in real, factual song descriptions.
+3. **LLM explanation** (`src/llm_agent.py`) — `generate_explanation()`
+   calls the Claude API if `ANTHROPIC_API_KEY` is set, using the retrieved
+   context as grounding; if no key is set (or the call fails), it falls
+   back to a deterministic offline stand-in built from that same context.
+4. **Guardrails** (`src/guardrails.py`) — `validate_explanation()` runs
+   three checks on whatever text came out of step 3: an **existence**
+   check (does it mention the song's title/artist), an **energy
+   consistency** check (do any energy-descriptor words match the song's
+   actual energy value), and a **sanity** check (non-empty, under 60
+   words). If any check fails, the explanation is replaced with a
+   deterministic sentence built from `score_song()`'s own reasons.
+5. **Output** — the final ranked recommendations, each with a validated,
+   guardrail-checked explanation and a record of which check(s) passed or
+   failed.
+
+## Setup Instructions
+
+```bash
+# 1. (optional) create a virtual environment
+python -m venv .venv
+source .venv/bin/activate      # Mac/Linux
+.venv\Scripts\activate         # Windows
+
+# 2. install dependencies
+pip install -r requirements.txt
+
+# 3. (optional) enable live Claude API calls for explanations
+#    the system works fully offline without this — it falls back
+#    to a deterministic stand-in explanation instead
+export ANTHROPIC_API_KEY="your-key-here"
+```
+
+Run the system:
+
+```bash
+# baseline + AI-enhanced recommendations for all sample profiles
+python3 -m src.main
+
+# scripted evaluation: normal / edge / deliberate-failure cases
+python3 evaluate.py
+
+# full pytest suite
+pytest tests/ -v
+```
+
+## Sample Interactions
+
+These are real, unedited excerpts from `python3 -m src.main`'s AI-enhanced
+output, captured in this environment (no `ANTHROPIC_API_KEY` set, so
+`source` here is the offline path — with a key set, `source` would show the
+same fields but the text would come from the live Claude API instead):
+
+```
+Sunrise City - Score: 4.88
+Final explanation (llm): [OFFLINE STAND-IN] Sunrise City by Neon Echo: A bright pop track that matches its happy mood with high energy (0.82) and strong valence (0.84).
+  [PASS] existence: text mentions song title 'Sunrise City'
+  [PASS] energy_consistency: no energy-descriptor words found; check passes trivially
+  [PASS] sanity: text has 24 words
+```
+
+```
+Rooftop Lights - Score: 3.29
+Final explanation (llm): [OFFLINE STAND-IN] Rooftop Lights by Indigo Parade: An indie pop track that earns its happy mood with energy at 0.76 and strong valence (0.81).
+  [PASS] existence: text mentions song title 'Rooftop Lights'
+  [PASS] energy_consistency: no energy-descriptor words found; check passes trivially
+  [PASS] sanity: text has 24 words
+```
+
+```
+Gym Hero - Score: 2.96
+Final explanation (llm): [OFFLINE STAND-IN] Gym Hero by Max Pulse: An intense pop track with the highest energy in this range (0.93) and very low acousticness (0.05), pointing to a heavily produced, synthetic sound.
+  [PASS] existence: text mentions song title 'Gym Hero'
+  [PASS] energy_consistency: energy descriptor(s) consistent with energy=0.93
+  [PASS] sanity: text has 31 words
+```
+
+The third example is the most telling: unlike the first two, its
+`energy_consistency` check wasn't a trivial pass — the text says "intense,"
+the guardrail confirmed that word actually matches the song's 0.93 energy
+value, and only then let it through.
+
+## Design Decisions
+
+- **Why an offline fallback mode:** the whole point of a class project is
+  that it needs to run reliably for grading and demos, without depending on
+  a live API key, network access, or incurring API costs every time it's
+  run. Building the offline stand-in directly into `generate_explanation()`
+  (rather than as a separate mocked-out test path) means the exact same
+  code runs in both modes — the only thing that changes is where the text
+  comes from, not how it's validated.
+- **Why TF-IDF over embeddings for retrieval:** the note corpus is 18 short
+  documents. A learned or API-based embedding model would add an external
+  dependency (another API key, another network call, another point of
+  failure) to solve a retrieval problem that scikit-learn's TF-IDF +
+  cosine similarity already solves well at this scale, entirely locally
+  and deterministically. Simplicity won over marginal retrieval-quality
+  gains that wouldn't be visible in a catalog this small anyway.
+- **Why these specific guardrail checks:** existence and energy consistency
+  target the two failure modes an LLM is actually likely to produce in
+  this domain — naming the wrong song (a plausible-sounding hallucination
+  when several songs share a genre or mood) and describing a song's energy
+  with a word that contradicts its numeric value (since the model is
+  reasoning about a number, not a felt experience). The sanity check is a
+  cheap backstop against empty or bloated output. All three are
+  deterministic string/number checks rather than a second LLM call judging
+  the first — that keeps the guardrail itself trustworthy and fast, and
+  avoids paying for (or depending on) another model call just to check the
+  first one.
+
+## Testing Summary
+
+- **`python3 evaluate.py`: 3/3 passing.** The normal case confirms a
+  well-formed explanation for the top recommendation passes all three
+  guardrail checks; the edge case confirms out-of-distribution preferences
+  (`genre="classical"`, `mood="epic"`) don't crash the pipeline and still
+  produce a valid result; the deliberate-failure case confirms a fabricated
+  explanation naming the wrong song with a mismatched energy word is
+  actually caught and replaced, not silently passed through.
+- **`pytest tests/ -v`: 8/8 passing.** The 6 tests in
+  `tests/test_ai_pipeline.py` caught that `SongNoteStore` loads and
+  retrieves context correctly (including that a song's own title appears
+  in its retrieved context), that `validate_explanation()` correctly
+  accepts well-formed text, correctly rejects a wrong-song mention and a
+  mismatched energy descriptor (forcing the fallback path in both cases),
+  and that `generate_explanation()` never raises even with no API key
+  configured; the 2 pre-existing tests in `tests/test_recommender.py`
+  continue to confirm the baseline rule-based scorer's ranking and
+  explanation behavior is unaffected.
+
+This README does not include an AI-collaboration reflection — that lives in
+[`model_card.md`](model_card.md), under **Section 9: Personal Reflection**.
+
+---
+
+# Module 3: Original Recommender Documentation
+
+The sections below are the original Module 3 documentation for the
+underlying rule-based recommender, kept as-is for reference.
 
 ## Project Summary
 
@@ -57,42 +237,6 @@ why each song scored the way it did (e.g. "genre match (+1.5)").
 This mirrors real systems in a simplified way: real recommenders also
 turn raw attributes into scores and rank across a catalog — just with far
 more features and far more users' behavior data feeding in.
-
----
-
-## Getting Started
-
-### Setup
-
-1. Create a virtual environment (optional but recommended):
-
-```bash
-   python -m venv .venv
-   source .venv/bin/activate      # Mac or Linux
-   .venv\Scripts\activate         # Windows
-```
-
-2. Install dependencies
-
-```bash
-   pip install -r requirements.txt
-```
-
-3. Run the app:
-
-```bash
-   python -m src.main
-```
-
-### Running Tests
-
-Run the starter tests with:
-
-```bash
-pytest
-```
-
-You can add more tests in `tests/test_recommender.py`.
 
 ---
 
